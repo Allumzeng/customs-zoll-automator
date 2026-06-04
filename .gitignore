@@ -1,0 +1,20 @@
+# Secrets — never commit env files anywhere in the tree (safety net)
+**/.env
+**/.env.*
+!**/.env*.example
+
+# Node
+**/node_modules/
+
+# Next.js build output
+**/.next/
+**/out/
+**/build/
+
+# Logs
+**/*.log
+
+# Misc
+.DS_Store
+*.pem
+**/*.tsbuildinfo
