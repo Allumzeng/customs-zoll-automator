@@ -1,8 +1,61 @@
+import { PDFParse } from "pdf-parse";
 import { CLAUDE_MODEL, createAnthropicClient, parseJsonResponse } from "./claude";
 import { applyExtractionMetrics } from "./confidence";
 import { EXTRACTION_SYSTEM_PROMPT } from "./prompts";
 import { addAudit, demoExtraction, getModel, saveExtraction } from "./store";
 import type { CustomsExtraction } from "./schema";
+
+// Large uploads (full manuals, bundled archives) blow past the model's output
+// budget — the JSON gets truncated mid-object and parsing fails — and cost a lot.
+// Reject anything beyond this page count with a clear, actionable message.
+const MAX_PAGES = 50;
+
+// Count pages across the upload set: PDFs by their real page count, images as 1.
+// A counting failure must not block extraction, so we fall back to 1 on error.
+async function countPages(files: File[]): Promise<number> {
+  let total = 0;
+  for (const file of files) {
+    const isPdf = (file.type || "").includes("pdf") || file.name.toLowerCase().endsWith(".pdf");
+    if (!isPdf) {
+      total += 1;
+      continue;
+    }
+    let parser: PDFParse | undefined;
+    try {
+      parser = new PDFParse({ data: await file.arrayBuffer() });
+      const info = await parser.getInfo();
+      total += info.total || 1;
+    } catch {
+      total += 1;
+    } finally {
+      await parser?.destroy();
+    }
+  }
+  return total;
+}
+
+// Claude does not always honor the schema exactly: document_types may come back
+// as a comma-separated string, and items may be omitted or non-array. Coerce both
+// to real arrays so downstream rendering (.join / .map) never throws.
+function toStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v));
+  if (typeof value === "string") {
+    return value
+      .split(/[,;/]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+// Some scalar fields (language_detected) are occasionally returned by Claude
+// wrapped as a FieldValue object {value, confidence, ...}. Unwrap to the scalar.
+function toScalarString(value: unknown, fallback = ""): string {
+  if (value && typeof value === "object" && "value" in (value as object)) {
+    return String((value as { value: unknown }).value ?? fallback);
+  }
+  return value == null ? fallback : String(value);
+}
 
 function normalizeClaudeExtraction(
   raw: Partial<CustomsExtraction>,
@@ -16,6 +69,9 @@ function normalizeClaudeExtraction(
     model_id: modelId,
     created_at: raw.created_at || new Date().toISOString(),
     status: "extracted",
+    language_detected: toScalarString(raw.language_detected, "mixed") as CustomsExtraction["language_detected"],
+    document_types: toStringArray(raw.document_types),
+    items: Array.isArray(raw.items) ? raw.items : [],
     human_corrections: raw.human_corrections || {},
   } as CustomsExtraction);
 }
@@ -23,6 +79,15 @@ function normalizeClaudeExtraction(
 export async function extractDocuments(modelId: string, files: File[]) {
   if (!files.length) {
     throw new Error("Upload at least one PDF or image document.");
+  }
+
+  const pageCount = await countPages(files);
+  if (pageCount > MAX_PAGES) {
+    throw new Error(
+      `This upload is ${pageCount} pages. The extractor handles up to ${MAX_PAGES} pages per submission. ` +
+        `Please upload the specific shipment documents (commercial invoice, packing list, CMR, AWB, B/L) ` +
+        `rather than full manuals, guides, or bundled archives.`
+    );
   }
 
   const model = await getModel(modelId);
@@ -45,7 +110,7 @@ export async function extractDocuments(modelId: string, files: File[]) {
 
     const response = await anthropic.messages.create({
       model: CLAUDE_MODEL,
-      max_tokens: 8192,
+      max_tokens: 16384,
       system: model.extraction_prompt || EXTRACTION_SYSTEM_PROMPT,
       messages: [
         {

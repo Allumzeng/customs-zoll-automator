@@ -89,8 +89,8 @@ export default async function DashboardPage() {
                       <td className="px-4 py-3">
                         <Badge variant="outline">{extraction.status}</Badge>
                       </td>
-                      <td className="px-4 py-3 uppercase">{extraction.language_detected}</td>
-                      <td className="px-4 py-3">{extraction.document_types.join(", ")}</td>
+                      <td className="px-4 py-3 uppercase">{asText(extraction.language_detected)}</td>
+                      <td className="px-4 py-3">{(Array.isArray(extraction.document_types) ? extraction.document_types : []).join(", ")}</td>
                       <td className="px-4 py-3 tabular-nums">
                         {(extraction.overall_confidence * 100).toFixed(0)}%
                       </td>
@@ -111,6 +111,15 @@ export default async function DashboardPage() {
       </main>
     </div>
   );
+}
+
+// Defensive: some scalar fields may arrive wrapped as a FieldValue object
+// {value, confidence, ...} if the model didn't honor the schema. Render the scalar.
+function asText(value: unknown): string {
+  if (value && typeof value === "object" && "value" in (value as object)) {
+    return String((value as { value: unknown }).value ?? "");
+  }
+  return value == null ? "" : String(value);
 }
 
 function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
